@@ -1,0 +1,238 @@
+---
+title: "KL1_Analysis"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(knitr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(BiocStyle)
+library(limma)
+library(edgeR)
+library(threejs)
+library(htmlwidgets)
+library(xtable)
+library(ReportingTools)
+library(plotly)
+library(openxlsx)
+library(DT)
+library(affycoretools)
+library(Glimma)
+library(ComplexHeatmap)
+library('factoextra')
+library("genefilter")
+library(pheatmap)
+library(DESeq2)
+library(scales)
+library(ggrepel)
+library(dplyr)
+library(impute)
+```
+```{r}
+fdrcutoff= 0.1
+missingCutoff= 5
+datamode = "Sample"
+datapath2 = "~/Desktop/Anaysis for paper/2019-07-29_Dubal-Brain-45_SG edit.xlsx" #Utah cohort hippocampus
+
+```
+```{r}
+samps2 = read.csv("~/Desktop/Anaysis for paper/utah.cohort.sample.info.csv", stringsAsFactors = F) #Utah cohort
+samps2$Treatment <- as.factor(ifelse(samps2$Treatment == "Veh", "Ctrl", ifelse(samps2$Treatment=="hKL","Klotho","Klotho1")))
+colnames(samps2)[1] <- "Sample.ID"
+samps2 = samps2[order(samps2$Run.Order),]
+table(samps2$Treatment)
+samps2$Batch = as.factor (samps2$Batch)
+```
+```{r}
+raw.data2 = read.xlsx(datapath2)
+colnames(raw.data2) = gsub("Name", "Metabolites", colnames(raw.data2))
+any(duplicated(raw.data2$Metabolites)) #FALSE
+sum(! is.na(raw.data2$CV))
+row.names(raw.data2)= raw.data2$Metabolites
+colnames(raw.data2) <- gsub("\\.mzdata", "", colnames(raw.data2))
+stopifnot(all(samps2$Sample.ID %in% colnames(raw.data2)))
+feature_info = select(raw.data2, featureidx)
+cleanup <- function(input, selected_column)
+{
+  dat= dplyr::select(input, starts_with(selected_column))
+  print(colnames(dat))
+  dat[dat==0] <- NA
+  dat= as.matrix(log2(dat))
+  
+  print(paste0("missing%=",round(mean(is.na(dat))*100)))
+  print(apply(na.omit(dat),2,range))
+  
+  outlist= list("dat"= dat)
+  return(outlist)
+}
+```
+```{r}
+sample.qc2 = cleanup(raw.data2, "QC")$dat
+o= order(as.integer(gsub("QC", "", colnames(sample.qc2))))
+sample.qc2 = sample.qc2[,o]
+colnames(sample.qc2)
+CV= data.frame(Metabolites = row.names(sample.qc2), CV= (apply(sample.qc2,1,function(x) sd(x, na.rm= T))/rowMeans(sample.qc2, na.rm = T))*100, stringsAsFactors = F)
+```
+```{r}
+substr(datamode,1,3)
+raw.matrix2 = cleanup(raw.data2, substr(datamode,1,3))$dat
+raw.matrix2 = raw.matrix2[, match(samps2$Sample.ID, colnames(raw.matrix2))]
+stopifnot(all.equal(colnames(raw.matrix2), samps2$Sample.ID)) #TRUE
+samps2$percent_missings = round(colMeans(is.na(raw.matrix2))*100,2)
+stopifnot(all.equal(row.names(sample.qc2), row.names(raw.matrix2)))
+```
+```{r}
+mean(is.na(raw.matrix2))*100 #2%
+mean(rowMeans(is.na(raw.matrix2))*100 < 5)*100
+colMeans(is.na(raw.matrix2))*100
+
+```
+```{r}
+missingCutoff = 5
+missing_by_feature2 = data.frame(Metabolites = row.names(raw.matrix2), mean_log2abundance_noNA = rowMeans(raw.matrix2, na.rm=T), percent_missing= rowMeans(is.na(raw.matrix2))*100, stringsAsFactors = F)
+missing_by_feature2 = dplyr::left_join(missing_by_feature2, CV, by= "Metabolites")
+#pdf(paste0("./plots/percent_missing_meanabundance_", ".pdf"))
+plot(missing_by_feature2$mean_log2abundance_noNA, missing_by_feature2$percent_missing, pch=19, col= "light blue", xlab = "mean log2 abundance", ylab = "Percent of missingness", main = datamode)
+points(missing_by_feature2$mean_log2abundance_noNA[missing_by_feature2$percent_missing>=missingCutoff],
++        missing_by_feature2$percent_missing[missing_by_feature2$percent_missing>=missingCutoff], pch=19, col="orange")
+legend("topright", legend = c (paste0 ("<", missingCutoff, "%missingness"), paste0(">=", missingCutoff, "%missingness")),pch=19, cex= 0.8, col= c("light blue", "orange"))
+#dev.off()
+```
+```{r}
+table(missing_by_feature2$percent_missing)
+samps2 %>% group_by(Treatment) %>%summarise(mean(percent_missings))
+ms.plot = ggplot(samps2, aes(x= reorder(Sample.ID, percent_missings), y= percent_missings, fill= Treatment)) + geom_bar(stat= "identity") + labs(title = paste0 ("Sample missing data"), x= "", y= "Percent of missingness", fill= "") + theme(legend.position = "top", axis.text.x = element_text(angle=90, hjust=1))
+ms.plot
+#dev.off()
+```
+```{r}
+source("EigenMS.R", local = T)
+met_info = read.csv("~/Desktop/R analysis trial/met_info.csv")
+dat.matrix2 <- eig_norm1(m = raw.matrix2, treatment = samps2$Treatment, prot.info = met_info, write_to_file = '')
+norm.dat.matrix2 <- eig_norm2(rv = dat.matrix2)
+```
+```{r}
+select_feature2 = missing_by_feature2 [missing_by_feature2$percent_missing< missingCutoff & missing_by_feature2$CV <30,]$Metabolites
+ data.matrix.filter2 = norm.dat.matrix2$norm_m[row.names(norm.dat.matrix2$norm_m) %in% select_feature2,]
+ dim(data.matrix.filter2)
+ mean(is.na(data.matrix.filter2))*100
+ range(apply(data.matrix.filter2, 2, function(x) mean(is.na (x))*100))
+ limma::plotDensities(data.matrix.filter2, legend = F)
+ #BiocManager::install("impute")
+ impute.matrix2= impute::impute.knn(data.matrix.filter2)$data
+ #pca_set (input = impute.matrix, sample_df = samps, title= paste0("Imputed_", datamode))
+ limma::plotDensities(impute.matrix2, legend = F)
+ stopifnot(all.equal(colnames(impute.matrix2), samps2$Sample.ID))
+```
+```{r}
+noBatch2 = removeBatchEffect(norm.dat.matrix2$norm_m, design = model.matrix(~Treatment, samps2), batch2 = samps2$Batch)
+levels(samps2$Treatment)
+design2 <- model.matrix(~0 + Treatment + Batch + Protein_conc , data = samps2)
+colnames(design2)= gsub ("Treatment", "", colnames(design2))
+colnames(design2)
+contrasts2 = makeContrasts(Ctrl - Klotho, Ctrl-Klotho1, Klotho-Klotho1, (Ctrl - Klotho)- (Ctrl- Klotho1), levels = design2)
+fit2 <- lmFit(norm.dat.matrix2$norm_m, design = design2)
+fit2 <- contrasts.fit(fit2, contrasts2)
+fit2 <- eBayes(fit2, robust = T, trend = T)
+plotSA(fit2)
+out2 <- lapply(1:ncol(contrasts2), function(x) topTable(fit2, coef = x, n= Inf, adjust = "BH", p.value = fdrcutoff, sort.by = "p")[,-6])
+sapply(out2,nrow)
+
+```
+```{r}
+out2.out2 <- lapply(1:ncol(contrasts2), function(x) topTable(fit2, coef = x, n= Inf, adjust = "BH", p.value = 1, sort.by = "none")[,-6])
+#pdf("plots/hist_value.pdf")
+par(mfrow = c(2,2))
+for (i in 1:length(out2.out2)){hist(out2.out2[[i]]$P.Value, main = paste0("out2.out2_", colnames(contrasts2)[i]))}
+#dev.off()
+sapply(out2.out2,nrow)
+names(out2.out2) = colnames(contrasts2)
+outputname2 = colnames(contrasts2)
+outputname2[ncol(contrasts2)] <- "Interaction"
+```
+```{r}
+noCV2 = removeBatchEffect(noBatch2, design = model.matrix(~Treatment,samps2), batch = samps2$Batch, covariates = samps2$Protein_conc)
+```
+```{r}
+#if(!file.exists("plots")) dir.create("plots")
+#pdf(paste0("plots/PCA_Utah_cohort", ".pdf"))
+pca.norm <- as.matrix(noCV2)
+#vsd <- varianceStabilizingTransformation(noCV2)
+#pca.noCV2 <- as.matrix (noCV2)
+groups <- as.factor(samps2$Treatment)
+#res.pca2 <-prcomp((t(pca.noCV2)), scale = F)
+#pca <- prcomp(t(na.omit(input)),scale. = TRUE)
+res.pca2 <-prcomp((t(na.omit(pca.norm))), scale = T)
+myplot <- fviz_pca_ind(res.pca2,
+                       col.ind = groups, # color by groups
+                       addEllipses = T, # Concentration ellipses
+                       ellipse.type = "confidence",
+                       ellipse.level = 0.95,
+                       legend.title = "Groups",
+                       repel = T, label="none", axes = c(2,3)
+)
+myplot
+#dev.off()
+```
+```{r}
+plot_df2 <- as.data.frame(out2.out2)
+plot_df2 <- plot_df2 %>% select (metabolites, Ctrl...Klotho.logFC, Ctrl...Klotho.AveExpr, Ctrl...Klotho.t, Ctrl...Klotho.P.Value, Ctrl...Klotho.adj.P.Val)
+plot_df2 <- plot_df2[order(plot_df2$Ctrl...Klotho.adj.P.Val, decreasing = F),]
+plot_df2$Ctrl...KLotho.neg.log.p = -log(plot_df2$Ctrl...Klotho.P.Value, 10)
+#if(!file.exists("plots")) dir.create("plots")
+#pdf(paste0("plots/Volcano_plot_Ctrl..Klotho", ".pdf"), 10,15)
+myplot <- ggplot(plot_df2, aes(x = Ctrl...Klotho.logFC, y= Ctrl...KLotho.neg.log.p , color=ifelse(Ctrl...Klotho.P.Value <0.05, ifelse(Ctrl...Klotho.logFC>0, 'Upregulated', 'Downregulated'), 'n.s.'), label= metabolites)) + 
+  geom_point() + theme_Publication_blank()  +
+  scale_color_manual(values = c('Upregulated'='#ea5430', 'Downregulated'='#6181d1',  'n.s.'='lightgrey')) + scale_x_continuous(limits = c(-1,1), oob = squish, expand = c(0,0))  + scale_y_continuous(limits = c(0,6), oob = squish) +
+  geom_text_repel(data=head(plot_df2), color='black', max.overlaps = Inf) 
+
+myplot
+#dev.off()
+```
+```{r}
+plot_df3 <- as.data.frame(out2.out2)
+plot_df3 <- plot_df3 %>% select (metabolites, Ctrl...Klotho1.logFC, Ctrl...Klotho1.AveExpr, Ctrl...Klotho1.t, Ctrl...Klotho1.P.Value, Ctrl...Klotho1.adj.P.Val)
+plot_df3 <- plot_df3[order(plot_df3$Ctrl...Klotho1.adj.P.Val, decreasing = F),]
+plot_df3$Ctrl...KLotho1.neg.log.p = -log(plot_df3$Ctrl...Klotho1.P.Value, 10)
+if(!file.exists("plots")) dir.create("plots")
+pdf(paste0("plots/Volcano_plot_Ctrl..Klotho1_label15_reaxis", ".pdf"), 10,15)
+
+myplot <- ggplot(plot_df3, aes(x = Ctrl...Klotho1.logFC, y= Ctrl...KLotho1.neg.log.p , color=ifelse(Ctrl...Klotho1.P.Value <0.05, ifelse(Ctrl...Klotho1.logFC>0, 'Upregulated', 'Downregulated'), 'n.s.'), label= metabolites)) + 
+  geom_point() + theme_Publication_blank()  +
+  scale_color_manual(values = c('Upregulated'='#ea5430', 'Downregulated'='#6181d1',  'n.s.'='lightgrey')) + scale_x_continuous(limits = c(-1,1), oob = squish, expand = c(0,0))  + scale_y_continuous(limits = c(0,10), oob = squish) +
+  geom_text_repel(data= subset(plot_df3, Ctrl...Klotho1.P.Value <0.05 ), color='black', max.overlaps = Inf) +
+  geom_point(data= plot_df3 %>% filter(Ctrl...Klotho1.logFC<0.1) %>% filter(metabolites %in% out2.out2), color='green', shape=1)
+myplot
+dev.off()
+```
+```{r}
+
+```
+```{r}
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
